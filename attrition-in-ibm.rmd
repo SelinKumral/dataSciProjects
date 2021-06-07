@@ -1,0 +1,1482 @@
+---
+title: "Understanding Attrition in IBM"
+author: "CelineA"
+output:
+    html_document:
+        toc: true
+        toc_depth: 4
+        code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+"Attrition is the reduction in employees in an organisation due to retirement, resignations
+and deaths" [1](https://www.researchgate.net/profile/R_Mohanty3/publication/264823845_A_diagnostic_study_of_employee_attrition_in_an_Indian_automotive_company/links/568683c208ae051f9af3f94e.pdf)
+
+At the begining of this project, I thought that attrition and turnover were similar concepts. Obviously, there are similar and interchangeable definitons on different sources (like all social science concepts). But attrition and turnover are two different types of employee churn. Even if both attrition and turnover means decrease the number of employees, attrition is typically voluntary or natural (f.e. retirement or resignation). [2](https://business.dailypay.com/blog/employee-turnover-vs-attrition)
+
+**In this analysis, I'll work on attrition - in other words: "voluntary leave" of employees.**
+
+In a nutshell, I'm going to try to create a model that aims to predict attrition possibility based on given IBM employee data. Then, I'll try to understand the most influential causes of attrition possibility and which employee group is under the attrition risk most. Finally, I'll make suggestions on what can be done in order to reduce the attrition risk.
+
+
+# Executive Summary
+First of all, I reviewed the data description and took a quick look at the data. Then, I tried to describe IBM employees in five main domains by using both bivariate and univariate analysis methods. These five domains are **Demographics, Professional Background, Job Features, Financials and Effects on Employee**.
+
+Then, I fitted six different ml models to predict the employee attrition rate. Among all the models, the MARS model has the highest predictive power. 
+
+In this model, the 5 most influential features on attrition rate are **Monthly Income, Overtime, Age, Environment Satisfaction and Stock Option Level**. The effects of these features on the target variable (attrition) have been analyzed section 5. 
+
+Finally, I created a roadmap and solution suggestions based on these results section 5.3.
+
+
+# 1. First Look to data
+
+## 1.1. Installing packages
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(skimr) 
+library(janitor)
+library(knitr)
+library(gridExtra)
+library(grid)
+library(rpart)
+library(rpart.plot)
+library(caret)
+library(e1071) #for skewness func
+library(recipes)
+install.packages("vip")
+library(vip)
+library(earth)
+library(ranger)
+library(h2o)
+library(gbm)
+library(janitor) #for cleaning variableNAmes
+library(xgboost)
+library(reshape2)
+library(pdp)
+```
+
+## 1.2. Reading the data and take a quick look
+
+```{r, results='markup'}
+attrition <- read.csv("../input/ibm-hr-analytics-attrition-dataset/WA_Fn-UseC_-HR-Employee-Attrition.csv")
+skim(attrition)
+```
+
+## 1.3. Checking the missings
+
+With the skim function, we saw that there is no missing data. But let's ask again.
+
+```{r}
+any(is.na(attrition))
+```
+
+## 1.4. Data type conversions
+
+The skim function also distinguishes features by type. I looked at the feature description and compared if the data types matched with the description. All I have to do is convert the type of some variables from integer to factor.
+
+### 1.4.1. Factors
+
+```{r}
+beFactored <- c("Education", "EnvironmentSatisfaction", "JobInvolvement", 
+                "JobLevel", "JobSatisfaction", "PerformanceRating", 
+                "RelationshipSatisfaction", "WorkLifeBalance", "EmployeeNumber")
+data <- attrition %>% select(beFactored) %>% map_df(~ as.factor(.x))
+data2 <- attrition %>% select(-beFactored) %>% bind_cols(data)
+```
+
+### 1.4.2. Non-informative features
+
+The "Over18", "StandardHours" and "EmployeeCount" variables have the same values for all employees. Which means they will not provide distinguishing information for the analysis. That's why I will drop them. 
+
+```{r}
+# Over18
+levels(as.factor(data2$Over18))
+table(as.factor(data2$Over18)) 
+
+# StandardHours
+# Everyone in our dataset works 80 hours in standard.
+summary(data2$StandardHours)
+
+# EmployeeCount
+# It's 1 for everyone in our dataset.
+summary(data2$EmployeeCount) 
+```
+
+So, I decided to drop these three features from our dataset.
+
+
+```{r}
+data3 <- data2 %>% select(- Over18, -StandardHours, -EmployeeCount)
+```
+
+
+# 2. Descriptive Statistics {.tabset}
+
+Since there are few features, I can make simple feature groups. I evaluated all the features in ıur data in 5 main topics: **Demographics, Professional Background, Job Features, Financials and Effects on Employee**.
+
+
+## Demographics
+
+**Which features?** Age, Gender, MaritalStatus, Education, EducationField, DistanceFromHome
+
+
+```{r}
+data3 %>% select(Age, Gender, MaritalStatus, Education, EducationField, DistanceFromHome) %>% skim()
+```
+
+
+* Mean age is 37. 
+* There are more male (60%) employees then females (40%).
+* Almost the half of the employees are married (46%).
+* Most of the employees have a bachelor degree (39%). It followed by master degree (27%) and college degree (19%). 
+* Majority of the employees has a Life Sciences (41%) or a Medical degree (32%).
+* Most of the employees live close to their workplace (7km's on average). Farthest distance is 29km, but 69.8% of the employees live in a distance under 10km.
+* There is no information about how they came to work. It is important because the commute is a really important criterion for the employees. So, we can't define how commuting effects (or not) to attrition.
+
+
+```{r, warning=FALSE}
+ageplot <- ggplot(data3, aes(Age)) + geom_density(fill = "#4E84C4", alpha = 0.5) + ggtitle("Age") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+genderplot <- data3 %>% count(Gender) %>% 
+  mutate(pcnt = prop.table(n)) %>% 
+  ggplot(aes(Gender, pcnt, label = pcnt)) + 
+  geom_col(fill = "#4E84C4") + geom_label(size = 2.5, label.padding = unit(0.15, "lines")) + ggtitle("Gender") + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+msplot <- data3 %>% count(MaritalStatus) %>% mutate(pcnt = round(prop.table(n),2)) %>% ggplot(aes(MaritalStatus, pcnt, label = pcnt)) + 
+  geom_col(fill = "#4E84C4") + geom_label(size = 2.5, label.padding = unit(0.15, "lines")) + ggtitle("MaritalStatus") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+eduplot <- data3 %>% mutate(Education = fct_recode(data3$Education, "BelowCollege" = "1", "College" = "2", "Bachelor" = "3", "Master" = "4", "Phd" ="5")) %>%
+  count(Education) %>%
+  mutate(pcnt = round(prop.table(n), 2)) %>% 
+  ggplot(aes(Education, pcnt, label = pcnt)) + 
+  geom_col(fill = "#4E84C4") + geom_label(size = 2.5, label.padding = unit(0.15, "lines")) + ggtitle("Education") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+edufldplot <- data3 %>% count(EducationField) %>% mutate(pcnt = round(prop.table(n),2)) %>%
+  ggplot(aes(reorder(EducationField, pcnt), pcnt, label = pcnt)) + 
+  geom_col(fill = "#4E84C4") + geom_label(size = 2.5, label.padding = unit(0.15, "lines")) + ggtitle("EducationField") + coord_flip() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+distfhplot <- ggplot(data3, aes(DistanceFromHome)) + geom_density(fill = "#4E84C4", alpha = 0.5) + ggtitle("Distance from Home") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+grid.arrange(ageplot,genderplot,msplot,eduplot,edufldplot,distfhplot, 
+             ncol = 2)
+```
+
+
+## Professional Background
+
+
+**Which features?** TotalWorkingYears, NumCompaniesWorked, YearsAtCompany, YearsInCurrentRole, YearsSinceLastPromotion, YearsWithCurrManager
+
+
+```{r}
+data3 %>% select(TotalWorkingYears, NumCompaniesWorked, YearsAtCompany, YearsInCurrentRole, YearsSinceLastPromotion, YearsWithCurrManager) %>% skim()
+```
+
+* The average total experience of employees is 11 years. After the 10 year experience, there is a significant decrease.
+* The majority of employees have been working at IBM for 10 years or less (average 7).
+* Most of the employees have taken a promotion in the last 2 years. 
+* The distribution is positively skewed (the mass of the distribution is concentrated on the left side of the graph). Which means years between two promotions are not long.
+* Employees have been working with their current manager for 4 years on average.
+* Employees have been working in their current positions for an average of 4 years. But there are very few people who work in his/her current position for 5 years. 
+
+
+```{r}
+pb1 <- ggplot(data3, aes(TotalWorkingYears)) + geom_density(fill = "#4E84C4", alpha = 0.5) +
+  ggtitle("Total Working Years") + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+pb2 <- ggplot(data3, aes(YearsAtCompany)) + geom_density(fill = "#4E84C4", alpha = 0.5) + 
+  ggtitle("Years at Company") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+pb3 <- ggplot(data3, aes(YearsSinceLastPromotion)) + geom_density(fill = "#4E84C4", alpha = 0.5) + ggtitle("Years Since Last Promotion") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+pb4 <- ggplot(data3, aes(YearsWithCurrManager)) + geom_density(fill = "#4E84C4", alpha = 0.5) +
+  scale_x_continuous(breaks = seq(0, 17, 1)) + ggtitle("Years With Current Manager") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+pb5 <- ggplot(data3, aes(NumCompaniesWorked)) + geom_density(fill = "#4E84C4", alpha = 0.5) + ggtitle("Number of Companies Worked") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+pb6 <- ggplot(data3, aes(YearsInCurrentRole)) + geom_density(fill = "#4E84C4", alpha = 0.5) + ggtitle("Years in Current Role") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+grid.arrange(pb1, pb2, pb3, pb4, pb5, pb6,
+             ncol = 2)
+```
+
+
+#### Problem about NumCompaniesWorked
+
+The NumCompaniesWorked feature has a problem. Obviously, some of the employees calculated their answers by including IBM, but some others responded as companies they'd worked before IBM.
+
+```{r}
+data3 %>% count(NumCompaniesWorked) 
+```
+
+
+In this table, 197 people did not work anywhere other than IBM. They interpreted the question as "number of the companies they've worked, **except IBM**".
+
+521 people worked in 1 place except for IBM. Let's examine in detail:
+
+
+```{r}
+data3 %>% filter(TotalWorkingYears == YearsAtCompany) %>% count(NumCompaniesWorked) 
+```
+
+Logically experience years should be equal to years at IBM. In other words, if your total experience years are equal to your experience in IBM; you have been worked only in IBM. This means, there are 474 people who have been worked only in IBM. In other words, 474 people have interpreted the question as "the number of places I've worked including IBM."
+
+Let's take a look at the responses of people whose total working experience does not equal to their IBM experience:
+
+```{r}
+data3 %>% filter(TotalWorkingYears != YearsAtCompany) %>% count(NumCompaniesWorked)
+```
+
+When we filtered employees whose total experience is not equal to IBM experience, we see that 47 people stated that they've been worked in just 1 company. Obviously these 47 employees interpreted the question in a different way. 
+We can figure out the interpretation difference between these two groups for people who have worked for only one (or IBM + 1) companies. But how about the others? There is no way that we could differentiate who interpreted how the question.
+
+This disrupts the feature. I actually thought of eliminating this variable but I'm guessing it would be an important indicator for attrition. So I decided to:
+
+  * keep the feature and recode only for people who worked for only one (or IBM + 1) companies. 
+  * add an only_ibm variable. If an employee's total working experience equals his/her years in IBM; I'll consider them "worked only for IBM" (only_ibm = 1). All the others will be considered "worked for IBM + at least one other company" (only_ibm = 0).
+
+
+```{r}
+data4 <- data3 %>% mutate(NumCompaniesWorked = if_else(NumCompaniesWorked == 0, 1, as.numeric(NumCompaniesWorked)))
+
+# adding only_ibm feature
+data4 <- data4 %>% mutate(only_ibm = if_else(NumCompaniesWorked == 1, 1, 0),
+                          only_ibm = as.factor(only_ibm))
+
+pb7 <- ggplot(data4, aes(NumCompaniesWorked)) + geom_density(fill = "#4E84C4", alpha = 0.5) + ggtitle("Number of Companies Worked") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+pb8 <- ggplot(data4, aes(only_ibm)) + geom_bar(fill = "#4E84C4") +
+  ggtitle("Worked only at IBM") +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+grid.arrange(pb7, pb8, ncol = 2)
+```
+
+
+## Job Features
+
+**Which features?** Department, JobInvolvement, JobLevel, JobRole, BusinessTravel, TrainingTimesLastYear, OverTime
+
+```{r}
+data4 %>% select(Department, JobInvolvement, JobLevel, JobRole, BusinessTravel, TrainingTimesLastYear, OverTime) %>% skim()
+```
+
+* Sales executives are the most crowded group in the company (22% of the whole company). 
+* However, the Research & Development department accounts for 65% of the entire company. 
+* Majority of the employees "travel rarely" (71%)
+* 73% of the employees have job level-1 or 2.
+* 70% of the employees had professional training 2 or 3 times last year.
+* A large number of employees (59%) defined their job involvement level as "High Involvement (3)".
+* Only 28% of the employees stated that they were working overtime.
+
+
+```{r}
+data4 <- data4 %>% 
+  mutate(BusinessTravel = fct_relevel(BusinessTravel, c("Non-Travel", "Travel_Rarely", "Travel_Frequently")))
+         
+jf1 <- data4 %>% count(BusinessTravel) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(reorder(BusinessTravel, -perc), perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Business Travel") +
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.ticks = element_blank())
+
+jf2 <- data4 %>% count(Department) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(reorder(Department, -perc), perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Department") +
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+jf3 <- data4 %>% count(JobRole) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(reorder(JobRole, perc), perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Job Role") + 
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_text(size = 7)) + coord_flip()
+
+jf4 <- data4 %>% count(JobLevel) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(reorder(JobLevel, -perc), perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Job Level") +
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+jf5 <- data4 %>% count(JobInvolvement) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(JobInvolvement, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Job Involvement") +
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+jf6 <- data4 %>% mutate(TrainingTimesLastYear = as.factor(TrainingTimesLastYear)) %>%
+  count(TrainingTimesLastYear) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(TrainingTimesLastYear, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Training Times Last Year") +
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+jf7 <- data4 %>% count(OverTime) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(OverTime, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Over Time") +
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+  
+grid.arrange(jf3, arrangeGrob(jf1, jf2), arrangeGrob(jf4, jf5), arrangeGrob(jf6, jf7), ncol = 2)
+```
+
+
+## Financials
+
+**Which features?** StockOptionLevel, DailyRate, HourlyRate, MonthlyRate, MonthlyIncome, PercentSalaryHike 
+
+```{r}
+data4 %>% select(StockOptionLevel, DailyRate, HourlyRate, MonthlyRate, MonthlyIncome, PercentSalaryHike) %>% skim()
+```
+
+I have to admit, this is the least clear part for me. I am not 100% sure what Daily Rate, Hourly Rate, Monthly Rate, and Stock Option Level mean. So I'll interpret just Monthly Income and Salary Hike.
+
+* Monthly income is heavily right-skewed. Most of the employee's monthly income around 3000 dollars (or some other currency).
+
+* "Percent Salary Hike" feature is defined as: "The percentage of change in salary between 2 years (2017 - 2018)". All employees took a minimum of 11% raise. 
+
+* Percent Salary Hike feature is also right-skewed. Most of the employees took a raise between 11% and 15%. 
+
+We don't have any information about living conditions (inflation rate etc). Therefore we can't make any comment on whether salaries are competitive or how it affected employees' life.
+
+```{r}
+f1 <- ggplot(data4, aes(log(DailyRate))) + geom_density(fill = "#4E84C4", alpha = 0.5) +
+  ggtitle("Daily Rate") + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+f2 <- ggplot(data4, aes(log(HourlyRate))) + geom_density(fill = "#4E84C4", alpha = 0.5) +
+  ggtitle("Hourly Rate") + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+f3 <- ggplot(data4, aes(log(MonthlyRate))) + geom_density(fill = "#4E84C4", alpha = 0.5) +
+  ggtitle("Monthly Rate") + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+f4 <- ggplot(data4, aes(MonthlyIncome)) + geom_density(fill = "#4E84C4", alpha = 0.5) +
+  ggtitle("Monthly Income") + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+f5 <- ggplot(data4, aes(PercentSalaryHike)) + geom_density(fill = "#4E84C4", alpha = 0.5) +
+  ggtitle("Salary Hike %") + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+f6 <- data4 %>% mutate(StockOptionLevel = as.factor(StockOptionLevel)) %>% 
+  count(StockOptionLevel) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(StockOptionLevel, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Stock Option Level") + 
+  geom_label(size = 2.5, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+grid.arrange(f1, f2, f3, f5, f4, f6, nrow = 3)
+```
+
+
+## Effects on Employee
+
+**Which features?** EnvironmentSatisfaction, JobSatisfaction, PerformanceRating, RelationshipSatisfaction,
+WorkLifeBalance
+
+```{r}
+data4 %>% select(EnvironmentSatisfaction, JobSatisfaction, PerformanceRating, RelationshipSatisfaction,
+WorkLifeBalance) %>% skim()
+```
+
+* 61% of the employees highly(3) or very highly(4) satisfied by their work environment.
+* 61% of the employees highly(3) or very highly(4) satisfied with their jobs. 
+* 60% of the employees highly(3) or very highly(4) satisfied by the relationships with their colleagues.
+* 61% of the employees think their work - private life balance is "very good(3)".
+* **All employees'** job performance rated as "Excellent(3)" or "Outstanding(4)".
+
+```{r}
+e1 <- data4 %>% count(EnvironmentSatisfaction) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(EnvironmentSatisfaction, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Environment Satisfaction") + 
+  geom_label(size = 3, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+e2 <- data4 %>% count(JobSatisfaction) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(JobSatisfaction, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Job Satisfaction") + 
+  geom_label(size = 3, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+e3 <- data4 %>% count(RelationshipSatisfaction) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(RelationshipSatisfaction, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Relationship Satisfaction") + 
+  geom_label(size = 3, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+e4 <- data4 %>% count(WorkLifeBalance) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(WorkLifeBalance, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Work Life Balance") + 
+  geom_label(size = 3, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+e5 <-data4 %>% count(PerformanceRating) %>% mutate(perc = round(prop.table(n),2)) %>%
+  ggplot(aes(PerformanceRating, perc, label = perc)) + geom_col(fill = "#4E84C4") +
+  ggtitle("Performance Rating") + 
+  geom_label(size = 3, label.padding = unit(0.15, "lines"), position = position_stack(vjust = 0.5)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+grid.arrange(e1,e2,e3,e4,e5, ncol = 2)
+```
+
+
+# 3.Multivariate EDA {.tabset}
+
+In this section, I analyzed all five feature groups in terms of the relationship with the target feature, attrition. I didn't add all the features here. As in the demographics section, there are tabs for each feature group.
+
+
+## Demographics
+
+**Which features?** Age, Gender, MaritalStatus, Education, EducationField, DistanceFromHome
+
+**I'll take a look at** Age, DistanceFromHome
+
+
+```{r}
+#Age
+dp1 <- ggplot(data4, aes(Age, fill = Attrition)) + geom_density(alpha = 0.5) + ggtitle("Age")
+
+#DistanceFromHome
+dp2 <- ggplot(data4, aes(DistanceFromHome, fill = Attrition)) + 
+  geom_density(alpha = 0.5) + 
+  ggtitle("DistanceFromHome")
+
+grid.arrange(dp1, dp2, nrow = 2)
+```
+
+
+## Professional Background
+
+**Which features?** TotalWorkingYears, NumCompaniesWorked, YearsAtCompany, YearsInCurrentRole, YearsSinceLastPromotion, YearsWithCurrManager
+
+
+**I'll take a look at** TotalWorkingYears, YearsAtCompany, YearsSinceLastPromotion, NumCompaniesWorked
+
+
+#### Total Working Years
+
+The attrition rate in less experienced employees is higher. It seems **7 years** is an important point. As the total experience increases, the attrition rate decreases.
+
+```{r}
+# Total Working Years  
+data4 %>% ggplot(aes(TotalWorkingYears, fill = Attrition)) + geom_density(alpha = 0.5) + ggtitle("Total Working Years and Attrition") 
+```
+
+
+#### YearsAtCompany
+
+Attrition probability is very high in the employees' first 5 years in the company. After the 4th year, the attrition probability is decreasing.
+
+This pattern applies to all departments and job roles (except for Research directors). In the research directors' case, as years in company increase, attrition probability is also increasing. As opposed to other job roles, for research directors, more experience could also mean more responsibilities and workload.
+
+
+```{r}
+ggplot(data4, aes(YearsAtCompany, fill = Attrition)) + geom_density(alpha = 0.5) + ggtitle("Years at Company")
+
+ggplot(data4, aes(YearsAtCompany, fill = Attrition)) + geom_density(alpha = 0.5) +
+  facet_wrap(~ JobRole)
+```
+
+
+#### YearsSinceLastPromotion
+
+Again, question is not clear. I assume that if YearsSinceLastPromotion == 0,  that employee hasn't been promoted. On the other hand, it is also possible that one had been promoted, but it hadn't been passed a year since his/her promotion yet. This question could've been a follow up for another question (f.e. Have you ever been promoted in IBM?) or could've asked as to how many "months" had passed since the last promotion.
+
+```{r}
+ggplot(data4, aes(YearsSinceLastPromotion, fill = Attrition)) + geom_density(alpha = 0.5) +
+  ggtitle("Years Since Last Promotion")
+```
+
+
+The highest attrition rate can be seen in employees who promoted 0-1 years ago. 
+
+
+```{r}
+yslp <- data4 %>% filter(YearsSinceLastPromotion == 0) %>% 
+  ggplot(aes(YearsAtCompany, fill = Attrition)) + geom_density(alpha = 0.5) + 
+  scale_x_continuous(breaks = seq(1, 40, 2)) + ggtitle("No Promotion")+
+  theme(axis.title.y = element_blank())
+
+yslp_1 <- data4 %>% filter(YearsSinceLastPromotion != 0) %>% 
+  ggplot(aes(YearsAtCompany, fill = Attrition)) + geom_density(alpha = 0.5) + 
+  scale_x_continuous(breaks = seq(1, 40, 2)) + ggtitle("Promoted") + 
+  theme(axis.title.y = element_blank())
+grid.arrange(yslp, yslp_1, nrow = 2)
+```
+
+
+* Among the employees who had never promoted the highest attrition rate is between their 1st and 3rd years in the company.
+
+* For the employees who had at least once promoted, as working years in company increasing, the attrition rate decreasing.
+
+
+```{r}
+ggplot(data4, aes(YearsSinceLastPromotion, fill = Attrition)) + geom_density(alpha = 0.5) +
+  facet_wrap(~JobRole, scales = "free_x") + ggtitle("YearsSinceLastPromotion and Attrition in JobRoles") + 
+  theme(axis.title.y = element_blank())
+```
+
+
+* In terms of job roles, research directors have a different pattern again. For all job roles as years since last promotion increases, attrition rate decreases.
+
+* But in research directors, the attrition rate dramatically increases after the 10th year from their last promotion. 
+
+
+#### NumCompaniesWorked
+
+The highest attrition rate can be seen in employees who had been worked for 2 or fewer companies.
+
+```{r}
+ggplot(data4, aes(as.numeric(NumCompaniesWorked), fill = Attrition)) + geom_density(alpha = 0.5) + ggtitle("NumCompaniesWorked")
+```
+
+* For the employees who had been worked **only for IBM**, the attrition rate is highest in their first 5 years in IBM.
+* For the employees who had also been worked **other than IBM**, the attrition rate decreases as the years in company increase.
+
+```{r}
+ncw <- data4 %>% filter(NumCompaniesWorked == 1) %>% 
+  ggplot(aes(TotalWorkingYears, fill = Attrition)) + geom_density(alpha = 0.5) +
+  ggtitle("Worked Only for IBM")
+
+ncw_1 <- data4 %>% filter(NumCompaniesWorked > 1) %>% 
+  ggplot(aes(TotalWorkingYears, fill = Attrition)) + geom_density(alpha = 0.5) +
+  ggtitle("Worked NOT ONLY for IBM")
+
+grid.arrange(ncw, ncw_1, nrow = 2)
+```
+
+
+## Job Features
+
+**Which features?** Department, JobInvolvement, JobLevel, JobRole, BusinessTravel, TrainingTimesLastYear, OverTime
+
+
+**I'll take a look at** JobInvolvement, Department, JobLevel, JobRole, BusinessTravel, OverTime
+
+
+#### JobInvolvement
+
+Attrition rate decreases as job involvement level increases. 
+
+The highest attrition rate is in job involvement level "Low (1)".
+
+
+```{r}
+#JobInvolvement
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(JobInvolvement) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  select(-attrNum) %>% 
+  ggplot(aes(JobInvolvement, perc, label = perc)) + geom_col(fill = "#4E84C4") + ggtitle("JobInvolvement and Attrition") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 4) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+
+#### JobLevel
+
+Attrition Rate is higher than the other levels in job levels 1(26%) and 3(15%).
+
+Let's take a closer look at these levels:
+
+```{r}
+jl <- data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(JobLevel) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  select(-attrNum) %>% 
+  ggplot(aes(JobLevel, perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("JobLevel vs Attrition") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 3) + 
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+jl1 <- data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  filter(JobLevel == 1) %>%
+  group_by(JobRole) %>%
+  count(attrNum) %>%
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  ggplot(aes(reorder(JobRole, perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("JobLevel = 1 and Attrition") +
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 2.5) + coord_flip() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+jl3 <- data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  filter(JobLevel == 3) %>%
+  group_by(JobRole) %>%
+  count(attrNum) %>%
+  mutate(perc = round(prop.table(n), 2)) %>%
+  filter(attrNum == 1) %>% 
+  ggplot(aes(reorder(JobRole, perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("JobLevel = 3 and Attrition") +
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+             size = 2.5) + coord_flip() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+grid.arrange(jl, arrangeGrob(jl1, jl3), ncol = 2)
+```
+
+
+* Only four job roles have level 1 employees: SalesRep (42%), HR (30%), LabTech (28%), ResSci (19%). This means for all job roles which have level 1 employees, at least 1 out of 5 employees quits his/her job.
+
+* Except for Sales Representatives, all job roles have level 3 employees.
+
+* Among all job roles, the highest attrition rates are seen in respectively  Laboratory Technicians (33%), HR (33%), Sales Executives (22%)
+
+
+#### JobRole in Departments
+
+* There is only one job role in HR department other than the managers.
+* 1 out of 3 HR employees had quit their jobs.
+* In Research and Development department, job roles with the highest attrition rate are laboratory technicians(24%) and research scientists(16%). 
+* In Sales department, highest attrition rate is in sales representatives (40%).
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(JobRole, Department) %>% 
+  count(attrNum) %>% ungroup() %>% group_by(JobRole) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  select(-attrNum) %>% 
+  ggplot(aes(reorder(JobRole, -perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + ggtitle("JobRole in Departments Attrition Rate") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 3) + 
+  facet_wrap(~Department, scales = "free_x") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+
+#### Business Travel
+
+As business travel frequency increases, the attrition rate also increases.
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(BusinessTravel) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  select(-attrNum) %>% 
+  ggplot(aes(BusinessTravel, perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("BusinessTravel vs Attrition") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 4) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+
+#### Overtime
+
+* Among the employees who don't work overtime, the attrition rate is 10%. 
+* Among the employees who do overtime, the attrition rate is 31%. 
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0),
+                 OverTime = fct_recode(data4$OverTime, "No OverTime" = "No", 
+                                       "Yes OverTime" = "Yes")) %>% 
+  group_by(OverTime) %>% 
+  count(attrNum) %>% 
+  mutate(AttritionRate = round(prop.table(n), 2)) %>% 
+  ggplot(aes(as.factor(attrNum), AttritionRate, label = AttritionRate)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("OverTime vs Attrition") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+             size = 4) + facet_wrap(~OverTime) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+```
+
+* In the HR department, 1 out of 4 HR employees is doing overtime.
+* In the research and development department, at least one-fourth of all employees in all job roles (except managers) do overtime.
+* In the sales department (except for managers) one-third of the employees do overtime.
+
+```{r}
+data4 %>% mutate(overNum = if_else(OverTime == "Yes", 1, 0)) %>% 
+  group_by(JobRole, Department) %>% 
+  count(overNum) %>% ungroup() %>% group_by(JobRole) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(overNum == 1) %>%
+  select(-overNum) %>% 
+  ggplot(aes(reorder(JobRole, -perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + ggtitle("JobRole in Departments OverTime Rate") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 3) + 
+  facet_wrap(~Department, scales = "free_x") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+Managers' overtime rate is quite less compared to other employees. There **may be a problem in job planning** or there may be **a disproportion between the workload and the number of employees**. The causes of overtime need to be investigated.
+
+
+## Financials
+
+
+**Which features?** StockOptionLevel, DailyRate, HourlyRate, MonthlyRate, MonthlyIncome, PercentSalaryHike
+
+
+**I'll take a look at** MonthlyIncome
+
+
+#### MonthlyIncome
+
+The probability of attrition decreases as income increases
+
+```{r}
+ggplot(data4, aes(MonthlyIncome, fill = Attrition)) + geom_density(alpha = 0.5) + 
+  ggtitle("MonthlyIncome and Attrition") + scale_x_continuous(breaks = seq(1009, 19999, 1000)) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x =  element_text(size = 7, face = "bold"),
+        axis.text.y =  element_text(size = 7, angle = 45, face = "bold"),
+        legend.position = c(.95, .95),
+        legend.justification = c("right", "top"),
+        legend.direction = "horizontal")
+```
+
+* Employees who earn between $1009-4009 have the highest attrition rates. 
+
+* There is another (but smaller) increase in attrition rates in employees who earns between $9009-11009 in a month.
+
+
+## Effects on Employee
+
+**Which features?** EnvironmentSatisfaction, JobSatisfaction, PerformanceRating, RelationshipSatisfaction,
+WorkLifeBalance
+
+
+**I'll take a look at** EnvironmentSatisfaction, JobSatisfaction, PerformanceRating, RelationshipSatisfaction, WorkLifeBalance
+
+
+#### EnvironmentSatisfaction
+
+As environment satisfaction increases, the probability of attrition decreases.
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(EnvironmentSatisfaction) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  select(-attrNum) %>% 
+  ggplot(aes(EnvironmentSatisfaction, perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("Environment Satisfaction and Attrition") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 3) +
+  theme(axis.title.y = element_blank())
+```
+
+The highest attrition rate was seen in employees with Environment Satisfaction = 1.
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  filter(EnvironmentSatisfaction == 1) %>%
+  group_by(JobRole) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>%
+  filter(attrNum == 1) %>% 
+  ggplot(aes(reorder(JobRole, perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("EnvironmentSatisfaction == 1 and AttritionRate in JobRoles") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 3) + coord_flip() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+
+Among all employees who have low(1) environment satisfaction, the highest attrition rates were seen in sales representatives (45%),  laboratory technicians (42%) and HR (40%) job roles respectively.
+
+
+#### JobSatisfaction
+
+As JobSatisfaction increases, attrition rate decreases.
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(JobSatisfaction) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  select(-attrNum) %>% 
+  ggplot(aes(JobSatisfaction, perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("JobSatisfaction vs Attrition") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 3) +
+  theme(axis.title.y = element_blank())
+```
+
+
+As expected, the highest attrition rate was seen in employees with low (1) job satisfaction (23%).
+
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  filter(JobSatisfaction == 1) %>%
+  group_by(JobRole) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>%
+  filter(attrNum == 1) %>% 
+  ggplot(aes(reorder(JobRole, perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("JobSatisfaction = 1 and AttritionRate in JobRoles") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+             size = 3) + coord_flip() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+
+Among the employees with low (1) job satisfaction, sales representatives (58%), HR (50%) and laboratory technicians (36%) were the three groups with the highest attrition rate.
+
+
+#### WorkLifeBalance
+
+As work-private life balance satisfaction increases, the attrition rate decreases.
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(WorkLifeBalance) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>% 
+  filter(attrNum == 1) %>%
+  select(-attrNum) %>% 
+  ggplot(aes(WorkLifeBalance, perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("WorkLifeBalance vs Attrition") + 
+  geom_label(position = position_dodge(width = .9),
+            size = 4) +
+  theme(axis.title.y = element_blank())
+```
+
+
+As expected, the highest attrition rate was seen in workers with low (1) work-private life balance satisfaction (31%).
+
+
+```{r}
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  filter(WorkLifeBalance == 1) %>%
+  group_by(JobRole) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>%
+  filter(attrNum == 1) %>% 
+  ggplot(aes(reorder(JobRole, perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("WorkLifeBalance == 1 and AttritionRate in JobRoles") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+             size = 3) + coord_flip() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+```
+
+
+Among the employees with low (1) work-private life balance satisfaction, laboratory technicians (70%), sales executives (50%) and research scientists (19%) were the three groups with the highest attrition rate.
+
+
+#### Performance Rating
+
+There are only 2 performance scores in our data: 3 (Excellent) or 4 (Outstanding). And in **both scores**, the attrition rate is **the same** (16%).
+
+```{r}
+ggplot(data4, aes(PerformanceRating)) + geom_bar(fill = "#4E84C4") + 
+  ggtitle("PerformanceRating and AttritionRate") 
+
+data4 %>% mutate(attrNum = if_else(Attrition == "Yes", 1, 0)) %>% 
+  group_by(PerformanceRating) %>% 
+  count(attrNum) %>% 
+  mutate(perc = round(prop.table(n), 2)) %>%
+  filter(attrNum == 1) %>% 
+  ggplot(aes(reorder(PerformanceRating, perc), perc, label = perc)) + geom_col(fill = "#4E84C4") + 
+  ggtitle("PerformanceRating and AttritionRate") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+             size = 3) +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+```
+
+
+So in this picture all employees are extraordinarily successful. Besides, the attrition rates are quite low. This could be a perfect utopia for an employee or **there is a problem with the performance measurement system**. In my opinion, the latter is the case here. I'll elaborate this in section 6 below.
+
+
+# 4.Modelling
+
+
+## 4.1. Splitting Data
+
+Before going to the splitting process, I'll create a checkpoint and remove the id number column (EmployeeNumber feature).
+
+```{r}
+all <- data4 %>% mutate(Attrition = fct_relevel(Attrition, "Yes", "No"))
+all1 <- select(all, -EmployeeNumber) 
+all2 <- all1 %>% mutate(Attrition = as.factor(Attrition))
+```
+
+Now, I can split the data
+
+```{r}
+set.seed(123)
+trainIndex <- createDataPartition(all2$Attrition, p = .8, 
+                                  list = FALSE, 
+                                  times = 1)
+
+attr_train <- all2[trainIndex,]
+attr_test  <- all2[-trainIndex,]
+```
+
+
+## 4.2. PreProcessing
+
+I'm using recipe package for preprocessing step. in Bradley Boehmke & Brandon Greenwell's  [Hands-On Machine Learning with R book](https://bradleyboehmke.github.io/HOML/engineering.html), preprocessing steps with recipe package explained clearly.
+
+
+### 4.2.1. Recipe 
+
+```{r}
+blueprint <- recipe(Attrition ~ ., data = attr_train) %>%
+  step_nzv(all_nominal())  %>%
+  step_corr(all_numeric(), -all_outcomes(), threshold = .8) %>%
+  step_BoxCox(all_numeric(), -all_outcomes()) %>%
+  step_scale(all_numeric(), -all_outcomes()) %>%
+  step_dummy(all_nominal(), -all_outcomes(), one_hot = TRUE)
+
+blueprint
+```
+
+
+### 4.2.2. Prepare
+
+```{r}
+prepare <- prep(blueprint, training = attr_train)
+
+prepare
+```
+
+
+### 4.2.3. Bake
+
+```{r}
+baked_train <- bake(prepare, new_data = attr_train)
+baked_test <- bake(prepare, new_data = attr_test)
+
+baked_train_cn <- clean_names(baked_train, "lower_camel")
+baked_test_cn <- clean_names(baked_test, "lower_camel")
+```
+
+To see baked test set and train set summary, I used again the skim() function. But here, in order to keep things short, I won't do that.
+
+```{r}
+# skim(baked_train)
+# skim(baked_test)
+```
+
+
+## 4.3. Model trainings {.tabset}
+
+In this section I'm going to create models with different algorithms. For each model, I'll calculate **accuracy** and **AUC** in order to evaluate model performance. Both accuracy and AUC are evaluation metrics which shows how good our model is performing.
+
+
+**Accuracy** is the fraction of predictions our model got right [3](https://manisha-sirsat.blogspot.com/2019/04/confusion-matrix.html). But accuracy can be misleading. Especially when we have a class imbalanced (difference between positive and negative number of labels) data set. So I'll also use another measurement: AUC. 
+
+
+**AUC** means "Area under the ROC Curve." An ROC curve (receiver operating characteristic curve) is a graph showing the performance of a classification model at all classification thresholds [for detailed explanation](https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc). 
+
+
+AUC measures the entire two-dimensional area underneath the entire ROC curve from (0,0) to (1,1). So, an AUC value is between 0 and 1. If a model has **100% wrong predictions**, its AUC value will be **0.0**. If a model has **100% correct predictions**, its AUC value will be **1.0** [4](https://developers.google.com/machine-learning/crash-course/classification/roc-and-auc).
+
+
+### 4.3.1.Logistic Regression
+
+```{r, message=FALSE, warning=FALSE}
+# Train a model
+set.seed(123)
+model_glm <- train(
+  attrition ~ ., 
+  data = baked_train_cn, 
+  method = "glm",
+  family = "binomial",
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+# Make predictions
+pred_class_glm_testset <- predict(model_glm, baked_test_cn)
+
+# Create a confusion matrix
+confusionMatrix(pred_class_glm_testset, baked_test_cn$attrition)
+
+# Find AUC
+lm_auc_testSet <- ModelMetrics::auc(baked_test_cn$attrition, pred_class_glm_testset)
+lm_auc_testSet
+```
+
+
+### 4.3.2.Regularized Logistic Regression
+
+```{r, message=FALSE, warning=FALSE}
+# Train a model
+set.seed(123)
+penalized_mod <- train(
+  attrition ~ ., 
+  data = baked_train_cn, 
+  method = "glmnet",
+  family = "binomial",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneLength = 10
+)
+
+# Make predictions
+pred_class_penalized_testset <- predict(penalized_mod, baked_test_cn)
+
+# Create a confusion matrix
+confusionMatrix(pred_class_penalized_testset, baked_test_cn$attrition)
+
+# Find AUC 
+glm_auc_testset <- ModelMetrics::auc(baked_test_cn$attrition, pred_class_penalized_testset)
+glm_auc_testset
+```
+
+
+### 4.3.3.MARS (Multivariate Adaptive Regression Splines)
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+hyper_grid <- expand.grid(
+  degree = 1:3, 
+  nprune = seq(2, 100, length.out = 10) %>% floor())
+
+set.seed(123)
+tuned_mars <- train(
+  x = subset(baked_train_cn, select = -attrition),
+  y = baked_train_cn$attrition,
+  method = "earth",
+  trControl = trainControl(method = "cv", number = 10),
+  tuneGrid = hyper_grid)
+```
+
+Best model and results plot
+
+```{r, message=FALSE, warning=FALSE}
+tuned_mars$bestTune
+ggplot(tuned_mars)
+```
+
+The optimal model retains 45 terms(nprune) and includes no interaction effects(degree).
+
+
+Train with the best model parameters
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+
+final_mars_grid <- expand.grid(
+  degree = 1, 
+  nprune = 45)
+
+set.seed(123)
+best_mars_model <- train(
+  x = subset(baked_train_cn, select = -attrition),
+  y = baked_train_cn$attrition,
+  method = "earth",
+  tuneGrid = final_mars_grid,
+  trControl = trainControl(method = "cv", number = 10))
+
+```
+
+Finally,
+
+```{r, message=FALSE, warning=FALSE}
+
+# Make predictions
+mars_pred_testset <- predict(best_mars_model, baked_test_cn)
+
+# Create a confusion matrix
+confusionMatrix(mars_pred_testset, baked_test_cn$attrition)
+
+# AUC calculation 
+mars_auc_testset <- ModelMetrics::auc(baked_test_cn$attrition, mars_pred_testset)
+mars_auc_testset
+```
+
+
+### 4.3.4.Random Forest
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+nFeatures <- length(setdiff(names(baked_train_cn), "attrition"))
+
+control <- trainControl(method = "repeatedcv", number = 5)
+
+
+set.seed(123)
+model_rf <- train(as.factor(attrition)~., 
+                  data = baked_train_cn, 
+                  method = "ranger",
+                  trControl = control)
+```
+
+Finding the best tune parameters
+
+```{r, message=FALSE, warning=FALSE}
+model_rf$results
+model_rf$bestTune
+```
+
+Train a new model based on the bestTune
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+model_ranger <- ranger(formula = attrition ~.,
+                       data = baked_train_cn,
+                       num.trees = nFeatures * 10,
+                       mtry = 44,
+                       splitrule = "gini",
+                       min.node.size = 1,
+                       replace = FALSE,
+                       importance = 'impurity',
+                       seed = 123)
+```
+
+Finally,
+
+```{r, message=FALSE, warning=FALSE}
+# Predict
+rf1_pred_testset <- predict(model_ranger, baked_test_cn)
+
+# Confusion Matrix
+confusionMatrix(rf1_pred_testset$predictions, baked_test_cn$attrition)
+
+# Calculating AUC
+rf1_auc_testset <- ModelMetrics::auc(baked_test_cn$attrition, rf1_pred_testset$predictions) 
+rf1_auc_testset
+```
+
+I'll try again with a grid search
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+
+hyper_grid <- expand.grid( 
+  mtry = floor(nFeatures * c(.05, .15, .25, .333, .4)), 
+  min.node.size = c(1, 3, 5, 10),        
+  splitrule = "gini") 
+
+set.seed(123)
+model_rf2 <- train(as.factor(attrition) ~.,
+                   data = baked_train_cn,
+                   method = "ranger",
+                   trControl = control,
+                   tuneGrid = hyper_grid,
+                   verbose = TRUE)
+```
+
+See the best tune parameters
+
+```{r, message=FALSE, warning=FALSE}
+model_rf2$bestTune
+```
+
+Modify model by the bestTune
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+model_ranger2 <- ranger(formula = attrition ~.,
+                        data = baked_train_cn,
+                        num.trees = nFeatures * 10,
+                        mtry = 21,
+                        splitrule = "gini",
+                        min.node.size = 3,
+                        replace = FALSE,
+                        importance = 'impurity',
+                        seed = 123)
+```
+
+Finally,
+
+```{r, message=FALSE, warning=FALSE}
+# Predict on test test
+rf2_pred_testset <- predict(model_ranger2, baked_test_cn)
+rf2_preds <- data.frame(preds = rf2_pred_testset$predictions)
+
+# Confusion matrix
+rf2_conf_mtx <- confusionMatrix(rf2_preds$preds, baked_test_cn$attrition)
+rf2_conf_mtx
+
+# Calculating AUC
+rf2_auc_testset <- ModelMetrics::auc(baked_test_cn$attrition, rf2_preds$preds)
+rf2_auc_testset
+```
+
+
+### 4.3.5.Gradient boosting
+
+I'll train a gradient boosting model by using "caret" package
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+
+caret_gbm_control <- trainControl(method = "repeatedcv",
+                                  number = 10,
+                                  repeats = 5,
+                                  verboseIter = FALSE,
+                                  classProbs = TRUE,
+                                  summaryFunction = twoClassSummary,
+                                  savePredictions = "final")
+
+set.seed(123)
+caret_gbm_model <- train(attrition ~., data = baked_train_cn,
+                         method = "gbm",
+                         trControl = caret_gbm_control,
+                         metric = "ROC")
+```
+
+Finally,
+
+```{r, message=FALSE, warning=FALSE}
+
+# Predict
+gbm_pred_testset <- predict(caret_gbm_model, baked_test_cn)
+
+# Confusion Matrix
+confusionMatrix(gbm_pred_testset, baked_test_cn$attrition)
+
+# Calculation AUC
+gbm_auc_testset <- ModelMetrics::auc(baked_test_cn$attrition, gbm_pred_testset) 
+gbm_auc_testset
+```
+
+
+### 4.3.6.XGBoost
+
+I'll train a xgboost model by using "caret" package
+
+```{r, message=FALSE, warning=FALSE, results='hide'}
+caret_xgb_control <- trainControl(method = "repeatedcv", number = 5)
+
+set.seed(123)
+model_xgb <- train(as.factor(attrition)~., 
+                   data = baked_train_cn, 
+                   method = "xgbTree",
+                   trControl = caret_xgb_control)
+```
+
+Finding the best tune
+
+```{r, message=FALSE, warning=FALSE}
+model_xgb$bestTune
+```
+
+Finally,
+
+```{r, message=FALSE, warning=FALSE}
+
+# Predict
+pred_xgb_testset <- predict(model_xgb, baked_test_cn)
+
+# Confusion Matrix
+xgb1_conf_mtx <- confusionMatrix(pred_xgb_testset, baked_test_cn$attrition)
+xgb1_conf_mtx
+
+# Calculating AUC
+xgb1_auc_testset <- ModelMetrics::auc(baked_test_cn$attrition, pred_xgb_testset)
+xgb1_auc_testset
+```
+
+
+## 4.4.Comparing Models
+
+In order to decide which model is the best classifier, I'll compare all model's accuracy and AUC values:
+
+```{r, message=FALSE, warning=FALSE}
+
+lm_model_accuracy <- model_glm$results$Accuracy
+glm_model_accuracy <- penalized_mod$results$Accuracy[87] # 87 was the best iteration
+mars_accuracy <- best_mars_model$results$Accuracy
+rf_accuracy <- rf2_conf_mtx$overall[1]
+xgb_accuracy <-xgb1_conf_mtx$overall[1]
+
+model_name <- c("lm", "glm", "mars", "randomForest", "xgboost")
+accuracy <- c(lm_model_accuracy, glm_model_accuracy, mars_accuracy, rf_accuracy, xgb_accuracy)
+AUC <- c(lm_auc_testSet, glm_auc_testset, mars_auc_testset, rf2_auc_testset, xgb1_auc_testset)
+
+
+models_comparison <- data.frame(model_name, AUC, accuracy)
+models_comparison %>% arrange(desc(AUC))
+```
+
+*MARS* is the best model.
+
+While xgboost model has the highest accuracy value (0.8907850), MARS model has the highest AUC value (0.7349939). Since I am not going to fit an ensemble model right now, I'm going to choose the MARS model.
+
+
+# 5.Results and Discussion
+
+
+## 5.1. Most influencial features (Variable Importance)
+
+By using vip package, we can extract the most important variables(most influential features) in our model. To understand MARS model and GCV (generalized cross-validation) better: [see](https://bradleyboehmke.github.io/HOML/mars.html#prerequisites-5) and [see](https://bradleyboehmke.github.io/HOML/mars.html#prerequisites-5) 
+
+
+Our MARS model chose 24 features out of a total of 77 features. The other 53 features were not included in the model. Therefore 53 features have 0 importance value. The first 4 most influential features are:
+
+* 1. Monthly income
+* 2. Overtime (Yes)
+* 3. Age
+* 4. Environment satisfaction (1-Low)
+
+
+```{r, message=FALSE, warning=FALSE}
+summary(best_mars_model)
+vip(best_mars_model, num_features = 25, bar = FALSE, value = "gcv") + ggtitle("GCV")
+```
+
+
+To see how these features related to attrition, I'll create partial dependency plots by using "pdp" package. To better understand partial dependency plots [take a look](https://bradleyboehmke.github.io/HOML/mars.html#prerequisites-5) 
+https://bradleyboehmke.github.io/HOML/iml.html#partial-dependence)
+
+The plots below shows the relationship (according the model that we trained) between attrition probability (target) and monthlyIncome, overTime(Yes), age and Low environmentSatisfaction features separately.
+
+```{r, message=FALSE, warning=FALSE}
+p_mi <- partial(best_mars_model, pred.var = "monthlyIncome", prob = TRUE) %>% autoplot()
+p_oty <- partial(best_mars_model, pred.var = "overTimeYes",  prob = TRUE) %>% autoplot()
+p_age <- partial(best_mars_model, pred.var = "age", prob = TRUE) %>% autoplot()
+p_es1 <- partial(best_mars_model, pred.var = "environmentSatisfactionX1", prob = TRUE) %>% autoplot()
+
+grid.arrange(p_mi, p_oty, p_age, p_es1, ncol = 2)
+```
+
+
+On minimum monthlyIncome (1009 dollars) attrition probability is the highest. Until 3995 dollars, with each additional increase on monthlyIncome, attrition probability is decreasing. After 3995 dollars, monthlyIncome increase doesn't make any effect on attrition probability. 
+
+There is a linear relationship between overTime(yes) and attrition probability. Making more overTime increase the attrition probability.
+
+While age increasing, the attrition probability is decreasing. Between age 38 and 57 attrition probability remains the same. Then after the age of 57, attrition probability is decreasing marginally by the age of 60. 
+
+There is a linear relationship between low environmentSatisfaction and attrition probability. Low environmentSatisfaction increases attrition probability.
+
+
+## 5.2.Who has red flags in IBM?
+
+**Monthly income**: Until 3995 dollars, earning less increase the probability of attrition. After 3995 dollars, monthlyIncome increase doesn't make any effect on attrition probability.
+
+**Overtime**: Making more overTime increase the attrition probability.
+
+**Age**: As employees getting older, probability of attrition is decreasing. 
+
+**Environment satisfaction**: Low environmentSatisfaction increases attrition probability.
+
+monthlyincome < 3995 dollars, making overtime, younger than the age 38 and has low environment satisfaction.
+
+```{r}
+riskGroup <- all2 %>% filter(MonthlyIncome < 3995 |
+                OverTime == "Yes"|
+                Age < 38|
+                EnvironmentSatisfaction == 1)
+
+riskGroup %>% group_by(JobRole) %>% count() %>% ungroup() %>%
+  mutate(perc = round(prop.table(n), 2)) %>% arrange(desc(perc)) %>%
+  ggplot(aes(reorder(JobRole, perc), perc, label = perc)) + 
+  geom_col(fill = "#4E84C4") + ggtitle("riskygroups") + 
+  geom_label(position = position_dodge(width = .9),    # move to center of bars
+            size = 3) + 
+  coord_flip() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank())
+
+```
+
+
+## 5.3.Main problem areas and suggestions for solution
+
+* Low environment satisfaction is a significant predictor of the attrition rate. On the bright side, problems in physical working conditions are the most easily improvable. **In order to improve the working environment satisfaction**; first, one should clearly define the problems in the working areas and offices. Then, there should be physical changes in order to create a better work environment.
+
+* Age is a significant predictor of the attrition rate. As employees getting younger, the probability of attrition is increasing. In other words, **IBM is hiring and training young talents but unfortunately, losing them after 2 years.** The HR department should define the reasons for young employees to leave. Which expectations of them couldn't be met? The most possible causes can be; **low income** (so they choose to move on to another company), **lack of career development paths**, or simply, **better working conditions** (shorter working hours, more well-defined job responsibilities).
+
+Whatever the reasons are, hiring and training an employee takes time and financial sources. Therefore, solving this problem probably will gain to IBM time and money.
+
+* Making overtime is a significant predictor of the attrition rate. Making more overtime increases the attrition probability. There may be 3 **possible reasons for overtime**:
+    - People who **planning workload** may not be making the time/work/labor (resource) distribution correctly. In this case, the people who are responsible to make the planning need to improve their skills. This aim can be achieved by giving them planning / prioritizing trainings.
+    - **Job descriptions of the junior job roles may have more overloaded than it should have**. While all decisions (even the simplest ones) are taken by the senior employees, all physical "doing" responsibilities belong to the juniors. Reviewing the job role responsibilities and redefine them if necessary can be a solution to this problem.
+    - Since IBM is a consulting company, the main job is delivering customer requests. Which means sales and the technical teams should work in harmony. But, if the sales team and the technical team (or the people who actually do the job) **can't be aligned to deliver results, over time can occur**. This is a very common problem as far as I know. If this is the case here, a couple of training programs about better negotiating or planning can be given to the sales department. 
+
+* **Final note**: Most of the attritions seen in employee's 2nd and 5th years (and then 9th) years in the company. This might be an indication of a problem in promotion processes. Two things should be considered while examining the promotion process: 
+    1. Promotion benefits, raise in income or title changes are enough. or 
+    2. how the promotion process is hard for the employee? For example, How long does it take? Or do the promotion criteria objective and well defined? 
+
+
+# 6.Problems about this data
+
+* Since it is imaginary data we don't know how the sample was selected. I assume it is representative.
+
+* We don't have survey questions and we don't know how the data was collected. 
+
+* Some questions are **not clear** for those who fill out. For example, the question of "the number of companies worked".  Obviously some people calculated their answers this including IBM, but some others answered as companies they'd worked before IBM. Survey questions should be in such a way that everyone can understand the same thing.
+
+* It's still **unclear for me what some features mean** (stock option levels, job level, hourly, monthly and daily rates).
+
+* **More detailed information is needed** to better interpret some variables. For example, we know how far an employee lives from the office. But we don't know how does him/her comes to the office? By bike, by car or by public transportation? Maybe reaching the office without a private car is challenging. Especially for the younger employees who probably don't have a car yet. Because commuting is a really important aspect for an employee. If going to work is a challenge on its own, at some point you'll want to change your job.
+
+* Some questions have likert-scale answers in the survey (f.e. Low-very low, medium, high, very high).  Likert-scale questions are designed for measuring how a person feels on a scale with two opposite edges (strongly disagree - strongly agree). But in order to quantify a certain feeling, **both edges of the scale should be represented equally**. In this survey, answers defined as Low - Medium - High - Very High. There should be also a "Very Low" point in order to represent equally the "Low" side of the scale.
+
+* In the data description, there are 4 levels of performance rating Low, Good, Excellent and Outstanding. But in the data, **there are only two levels of performance rating: Excellent and Outstanding**. We have 2 main problems here:
+    1-Again, there is just one low but 3 different good's. So practically there are only two choices for performance: **either employee is good or bad**. Not a person who has both "some good qualities" and "some open to improvement qualities". 
+    2-If everyone passes a test by taking the highest score, that test doesn't measure anything. So, **if everyone is excellent or outstanding** in his/her job, there is definitely a **problem with the performance measurement process**.
+
+
