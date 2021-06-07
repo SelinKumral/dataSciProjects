@@ -1,0 +1,807 @@
+---
+title: "Finding Genres or..."
+author: "Selin Kumral"
+date: May 19, 2020
+output: 
+  html_document:
+    toc: TRUE
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(warning=FALSE, message=FALSE)
+```
+
+# Introduction
+
+At the beginning of this project, my initial purpose was to create a model that can distinguish different genres in the data. I had 50 different genres, 588 (after removing duplicates) songs, and 10 technical features. However, I realized that with the dataset we have, it is not possible. But my final model has successfully distinguished two types of songs: slow/acoustic songs and energetic dance songs.
+
+# Setting Up
+
+## Installing packages
+
+```{r Packages, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(skimr)
+library(purrr)
+library(cluster)     # for general clustering algorithms
+library(factoextra)  # for visualizing cluster results
+library(outliers)
+library(dendextend)
+library(cluster)
+library(NbClust)
+library(clustertend) #  for statistical assessment clustering tendency
+library(clValid)
+library(knitr)
+library(fpc)
+library(treemapify)
+```
+
+## Reading the data and take a quick look
+
+```{r message=FALSE}
+top10 <- read_csv("../input/top-spotify-songs-from-20102019-by-year/top10s.csv")
+```
+
+## Checking the missings
+
+Luckily, we don't have any missing values.
+
+```{r}
+any(is.na(top10))
+```
+
+## Duplicate search
+
+Since this is a list made of popular songs by year, there might be duplicates.
+
+```{r}
+top10 %>% select(-year, -X1) %>% anyDuplicated()
+```
+
+There are 55 duplicate songs. I'll remove them from the data.
+
+```{r}
+dup <- top10 %>% select(-year, -X1) %>% duplicated()
+
+t10_noDuplicate <- top10 %>% 
+  mutate(isDuplicate = dup) %>% 
+  filter(isDuplicate == FALSE) %>%
+  select(-isDuplicate)
+```
+
+Next step; making data conversions and necessary changes.
+
+## Data conversions, row & colname changes (Data preparation)
+
+I'll convert X1(id) and year to a factor. Because these features are not actually numerical.
+I'll also change the column name "top genre" because it has apostrophes and not useful.
+At the beginning of my project, I needed to create row names for visualizations (I didn't use them in the final draft).
+
+```{r}
+t10_conversions <- t10_noDuplicate %>% 
+  mutate_if(is.character, as.factor) %>%
+  mutate(X1 = as.factor(X1),
+         year = as.factor(year)) %>%
+  rename(genre = `top genre`) %>%
+  remove_rownames() %>%
+  unite(genre_id, c("genre", "X1"), remove = FALSE) %>% 
+  column_to_rownames("genre_id")
+```
+
+## Scaling
+
+Features we'll use in the modeling process have a different range of values. In order to make them comparable, we have to standardize them.
+
+```{r}
+t10_scaled <- t10_conversions %>% select(-pop) %>% 
+  map_if(is.numeric, scale) %>% as.data.frame()
+```
+
+## Separating numeric variables
+
+I'll use only the numerical variables (bpm, energy, dance, db, libe, val, dur, acous, spch) in the modeling process. Because these features are technical features of a song and the only ones that I need in order to recognize a song's genre. This situation makes my job easier because I don't have to dummify any features.
+
+```{r}
+t10_numeric <- keep(t10_scaled, is.numeric)
+```
+
+
+Now we are ready to model.
+
+
+# Clustering
+
+We made our data ready to the modelling process. In the following steps we'll;
+
+* find out our data is suitable for clustering or not (tendency assessment),
+
+* perform k-means and hierarchical clustering,
+
+* decide which model gives the best results (cluster validation).
+
+## Tendency assessment
+
+"In cluster analysis is that clustering methods will return clusters even if the data does not contain any clusters." [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703). Therefore before moving on to the modeling process, we have to evaluate our dataset doesn't make of non-random structures. We can find out this by tendency assessment. We can assess the clustering tendency via "visual methods" or "statistical methods" [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703).
+
+I'll use only the statistical method here.
+
+## Statistical method for tendency assessment
+
+I'll use Hopkins statistic which evaluates the spatial randomness of the data. (For detailed information about Hopkins statistic and calculation steps, please check [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703)).
+
+clustertend::hopkins() function statistically evaluates the clustering tendency.
+
+The null and alternative hypotheses can be defined as: 
+
+* **Null hypothesis:** There are no meaningful clusters could be extracted from the data. (in other words; the dataset is uniformly distributed)
+
+* **Alternative hypothesis:** Meaningful clusters can be extracted from the data (in other words; the dataset is not uniformly distributed).
+
+```{r tendency assessment, warning=TRUE}
+set.seed(123)
+hopkins(t10_numeric, n = nrow(t10_numeric)-1)
+```
+
+If the value of Hopkins statistic (H) is close to zero, then we can reject the null hypothesis and conclude that our dataset is significantly clusterable (threshold is 0.5) [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703).
+
+With the **0.1346905** we can safely say our data is highly clusterable (the H value = 0.1346905, which is below the threshold 0.5). 
+
+After we saw that our data is clusterable, we can move on to the next step: determine the number of optimal clusters in the data for different clustering methods.
+
+
+# K-means Clustering (CLARA)
+
+At the beginning of this project, I planned to use the k-means algorithm. But our data has some outliers and since there is a few observation for each genre, I didn't want to remove them from the dataset. Therefore I decided to use a k-medoids clustering method.
+
+Because: *"K-medoid is a robust alternative to k-means clustering. This means that the algorithm is less sensitive to noise and outliers, compared to k-means, because it uses medoids as cluster centers instead of means."* [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703).
+
+First, I used the PAM algorithm, which is the most common k-medoids clustering method. But it took a long computation time and that could have caused a problem during the upload process. 
+Finally, I moved on to CLARA, which is also a k-medoids method. It is mostly used for analyzing much larger datasets due to shorter computation time. 
+
+## Decide: Distance method
+
+First of all, we have to decide which distance method we'll use.
+
+*"If your features deviate significantly from normality or if you just want to be more robust to existing outliers, then Manhattan, Minkowski, or Gower distances are often better choices."* [2](https://bradleyboehmke.github.io/HOML/intro.html).
+
+Some of my features don't have a normal distribution and I don't want to cross out them since I already have few features. So, I chose the **"Manhattan"** distance. 
+
+## Decide: Determining optimal clusters
+
+After choosing the distance method, we can determine the optimal number of clusters.
+On this step, I'll use the elbow, silhouette, and gap statistic methods.
+
+```{r message=FALSE, warning=FALSE}
+# define k-max ####
+t10_conversions %>% distinct(genre) %>% count() #50. k.max (number of genres)
+
+# Plot cluster results
+p1 <- fviz_nbclust(t10_numeric, FUN = clara, method = "wss", 
+                   k.max = 50, diss = dist(t10_numeric, method = "manhattan")) +
+  ggtitle("Elbow method") + theme(axis.text.x = element_text(size = 7.5),
+                                      axis.title.x = element_blank(),
+                                      axis.text.y = element_text(size = 8),
+                                      axis.title.y = element_text(size = 8),
+                                      plot.title = element_text(size = 12))
+
+p2 <- fviz_nbclust(t10_numeric, FUN = clara, method = "silhouette", 
+                   k.max = 50, diss = dist(t10_numeric, method = "manhattan")) +
+  ggtitle("Silhouette method") + theme(axis.text.x = element_text(size = 7.5),
+                                      axis.title.x = element_blank(),
+                                      axis.text.y = element_text(size = 8),
+                                      axis.title.y = element_text(size = 8),
+                                      plot.title = element_text(size = 12))
+
+p3 <- fviz_nbclust(t10_numeric, FUN = clara, method = "gap_stat", 
+                   k.max = 50, diss = dist(t10_numeric, method = "manhattan")) +
+  ggtitle("Gap statistic") + theme(axis.text.x = element_text(size = 7.5),
+                                      axis.text.y = element_text(size = 10),
+                                      axis.title.y = element_text(size = 8),
+                                      plot.title = element_text(size = 12))
+
+gridExtra::grid.arrange(p1, p2, p3, ncol = 1)
+```
+
+For elbow method the book says [2](https://bradleyboehmke.github.io/HOML/intro.html) : 
+
+*"The basic idea behind partitioning methods, such as k-means clustering, is to define clusters such that the total intra-cluster variation [or total within-cluster sum of square (WSS)] is minimized."*
+
+So, we should find the point in the plot that adding another cluster doesn't improve the total within-cluster sum of square (total wss). Which is the bend point (elbow) on the plot. In our case, it is 3 (1st plot).
+
+The silhouette method basically measures how well each object lies within its cluster. In other words; the quality of clustering. A high average silhouette width indicates a good clustering. In our plot, silhouette method (2nd plot) suggests 2 clusters.
+
+The book explains the gap statistics as:
+
+*"The gap statistic compares the total within intra-cluster variation for different values of k with their expected values under the null reference distribution of the data. The estimate of the optimal clusters will be a value that maximizes the gap statistic (i.e, that yields the largest gap statistic). This means that the clustering structure is far away from the random uniform distribution of points."* [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703).
+
+In our case, the gap statistics plot (3rd plot) suggests 1 cluster-solution is the best option.
+
+## Applying decided clustering method (CLARA)
+
+I chose the partitioning method (CLARA), distance method (Manhattan), and decided to build a model with 2 clusters.
+Note: I also tried a model with 3 clusters. But I decided to go for 2 clusters (I'll explain the reason on Cluster validation section).
+
+**On the next step:** I'll train my final model. But before going further, I want to see how hierarchical clustering works on this data.
+
+```{r ClaraClusterin}
+set.seed(123)
+claraClust <- clara(t10_numeric, k = 2, metric = "manhattan", samples = 100, pamLike = TRUE)
+print(claraClust)
+m_claraClust <- cbind(t10_conversions, cluster = claraClust$cluster)
+```
+
+
+# Hierachical Clustering
+
+As an alternative to partitioning methods (k-means), I'll use hierarchical clustering. 
+
+There are 2 types of hierarchical clustering method: Agglomerative clustering (AGNES) and Divisive hierarchical clustering (DIANA). For detailed information please check [2](https://bradleyboehmke.github.io/HOML/intro.html). 
+
+To perform hierarchical clustering we can use hclust(), agnes() or diana() functions. I'll prefer agnes and diana because, by these functions, we can also get the agglomerative coefficient (AC) and divisive coefficient (DC). Both measure the amount of clustering structure. Agglomerative and divisive coefficients (AC and DC) are going to help to choose the best linkage method on the next step.
+
+But first, we have to choose the distance method. Which is **"Manhattan"** distance. I've explained the reason on the previous chapter.
+
+Now we'll decide which linkage method we're going to use.
+
+## Decide: Hierarchical clustering method (a.k.a dissimilarity) - Choosing the linkage method
+
+Agglomerative and divisive coefficients (AC and DC) are going to help to choose the best linkage method on the next step. While values closer to 1 suggest a more balanced clustering structure, values closer to 0 suggest less well-formed clusters [2](https://bradleyboehmke.github.io/HOML/intro.html).
+
+## Agglomerative coefficient (AC)
+
+```{r}
+linkages <- c( "average", "single", "complete", "ward")
+names(linkages) <- c( "average", "single", "complete", "ward")
+
+set.seed(123)
+ac <- function(x) {
+  agnes(t10_numeric, method = x, metric = "manhattan")$ac
+}
+
+purrr::map_dbl(linkages, ac) 
+```
+
+## Divisive coefficient (DC)
+
+```{r}
+set.seed(123)
+dc <- diana(t10_numeric)
+dc$dc
+```
+
+As we can see, the best well-formed structure is agglomerative clustering with ward linkage method (ac = 0.9668326).
+
+After choosing the linkage method, we can determine the number of clusters.
+
+## Determining number of clusters
+
+```{r message=FALSE, warning=FALSE}
+# Plot cluster results
+set.seed(123)
+
+p4 <- fviz_nbclust(t10_numeric, FUN = hcut, method = "wss", 
+                   k.max = 50, diss = dist(t10_numeric, method = "manhattan")) +
+  ggtitle("Elbow method") + theme(axis.text.x = element_text(size = 7.5),
+                                      axis.title.x = element_blank(),
+                                      axis.text.y = element_text(size = 8),
+                                      axis.title.y = element_text(size = 8),
+                                      plot.title = element_text(size = 12))
+p5 <- fviz_nbclust(t10_numeric, FUN = hcut, method = "silhouette", 
+                   k.max = 50, diss = dist(t10_numeric, method = "manhattan")) +
+  ggtitle("Silhouette method") + theme(axis.text.x = element_text(size = 7.5),
+                                      axis.title.x = element_blank(),
+                                      axis.text.y = element_text(size = 8),
+                                      axis.title.y = element_text(size = 8),
+                                      plot.title = element_text(size = 12))
+
+p6 <- fviz_nbclust(t10_numeric, FUN = hcut, method = "gap_stat", 
+                   k.max = 50, diss = dist(t10_numeric, method = "manhattan")) +
+  ggtitle("Gap statistic") + theme(axis.text.x = element_text(size = 7.5),
+                                      axis.title.x = element_blank(),
+                                      axis.text.y = element_text(size = 8),
+                                      axis.title.y = element_text(size = 8),
+                                      plot.title = element_text(size = 12))
+
+gridExtra::grid.arrange(p4, p5, p6, ncol = 1)
+```
+
+
+Elbow and sihouette methods suggest 2 clusters. Gap statistic method suggests 1 cluster.
+
+I'll choose the 2 cluster solution.
+
+## Applying decided clustering method
+
+```{r AgnesClusterin}
+set.seed(123)
+agnesClust <- agnes(t10_numeric, metric = "manhattan", method = "ward")
+agnes_k2 <- cutree(agnesClust, k = 2)
+
+#Extracting clusters
+table(agnes_k2)
+m_agnesClust <- cbind(t10_conversions, cluster = agnes_k2)
+```
+
+
+# Cluster Validation Statistics
+
+So far I have 2 different models (one k-means and one hierarchical model). But how am I going to decide which one is better? 
+
+I'll use clValid() function in order to compare different algorithms.
+
+clValid() function has two cluster validation measures:
+
+**Internal measures:** Assesses the quality of clustering (connectivity, the silhouette coefficient, and the Dunn index).
+
+**External measures:** Assesses the consistency of a clustering result (by comparing it with the clusters obtained after each column is removed, one at a time. for detailed information: [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703) ).
+
+## Internal methods 
+
+Internal measures assess the quality of clustering by evaluating internal information instead of external reference. We'll check 3 values to decide which clustering model is the best:
+
+**Connectivity:** corresponds to what extent items are placed in the same cluster as their nearest neighbors in the data space. The connectivity has a value between 0 and infinity and should be **minimized.** [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703).
+
+
+**Dunn Index** defined as the ratio between the minimal inter-cluster distance to maximal intra-cluster distance. Should be **maximized** [3](https://en.wikipedia.org/wiki/Dunn_index).
+
+
+**Silhouette coefficient:** The silhouette analysis measures how well an observation is clustered and it estimates the average distance between clusters [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703). Should be **maximized.**
+
+```{r warning=FALSE}
+clmethods <- c("clara", "agnes")
+
+internal_assessment <- clValid(t10_numeric, nClust = 2:50, 
+                          clMethods = clmethods, validation = "internal",
+                          metric = "manhattan", method = "ward")
+
+optimalScores(internal_assessment)
+internal_assessment@measures
+```
+
+Regardless of number of clusters, agnes method (hierarchical clustering) has the best results in terms of connectivity, Dunn index and silhouette coefficient. 
+
+2 cluster solution has a much better connectivity value than the 41 cluster solution (28.84 and 667,942, respectively). On the other hand in terms of the Dunn Index, there is a quite small difference between two solutions (2 cluster solution Dunn index value: 0.07; 41 cluster solution Dunn index value: 0.12). Thus, I'll prefer the 2 cluster solution.
+
+## Stability measures
+
+Stability measures are a special version of internal measures. **Evaluates the consistency of a clustering result by comparing it with the clusters obtained after each column is removed, one at a time.** 
+
+clValid() function provides 4 stability measure values:
+
+* **The average proportion of non-overlap (APN):** ranges [0,1]. As the value decrease, the cluster consistency increases.
+* **The average distance (AD):** ranges[0, inf]. Smaller values preferred.
+* **The average distance between means (ADM):** ranges [0,1]. As the value decrease, the cluster consistency increases. As the value decrease, the compactness of the cluster increases.
+* **The figure of merit (FOM):** ranges [0,1]. As the value decrease, the cluster consistency increases [1](https://www.amazon.com/Practical-Guide-Cluster-Analysis-Unsupervised/dp/1542462703).
+
+```{r StabilityAssessment, warning=FALSE}
+stability_assessment <- clValid(t10_numeric, nClust = 2:50, clMethods = clmethods,
+                                validation = "stability", metric = "manhattan", 
+                                method = "ward") 
+
+# Display only optimal Scores
+optimalScores(stability_assessment)
+stability_assessment@measures
+```
+
+While AD and FOM measures are suggesting a 50 cluster model, APN and ADM measures are suggesting 2.
+
+As mentioned before, stability measures are calculated by comparing it with the clusters obtained after each column is removed, one at a time. So according to stability measure results; 
+
+The average proportion of observations that not placed in the same cluster **(APN)** is higher for the 50 cluster solution. Which means 50 cluster solution's clusters are more overlapped than 2 cluster solution.
+
+The average distance between observations placed in the same cluster under both cases (full data set and removal of one column) is higher for the 2 cluster solution **(AD)**. Which means for 50 cluster solution, observations in each cluster are located closer to each other compared to 2 cluster solution.
+
+The average distance between cluster centers for observations placed in the same cluster under both cases **(ADM)** is higher for 50 cluster solution. This means observations in each cluster 50 cluster solution, are located further away from the cluster center compared to 2 cluster solution.
+
+The average intra-cluster variance of the deleted column (where the clustering is based on the remaining (undeleted) columns) **(FOM)** is lower for 50 cluster solution. This means for 50 cluster solution, the distance between the clusters has changed less compared to 2 cluster solution. But I assume it might be the effect of overlapping clusters.
+
+
+**To sum up;** 
+
+I am going to choose **2 cluster** solution because; 
+
+```{r message=FALSE, warning=FALSE}
+agnes_k50 <- cutree(agnesClust, k = 50)
+
+agnes_k50_viz <- fviz_cluster(list(data = t10_numeric, cluster = agnes_k50),
+                              ellipse.type = "norm", geom = "point", stand = FALSE, 
+                              palette = "jco", ggtheme = theme_classic(),
+                              main = "50 cluster solution") + 
+  theme(legend.position = c(0.25, .50),
+        legend.key.size = unit(0.3, "cm"))
+
+# we already find agnes_k2 before
+
+agnes_k2_viz <- fviz_cluster(list(data = t10_numeric, cluster = agnes_k2),
+                             ellipse.type = "norm", geom = "point", stand = FALSE, 
+                             palette = "jco", ggtheme = theme_classic(), 
+                             main = "2 cluster solution") +
+  theme(legend.position = c(0.25, .20))
+
+gridExtra::grid.arrange(agnes_k50_viz, agnes_k2_viz, nrow = 1)
+```
+
+
+In 50 cluster solution clusters are mostly overlapped, and observations in clusters are located further from the cluster centers (graph on the left). On the other hand, 2 cluster solution clusters separated better from each other and seem much more consistent (graph on the right).
+
+# Analyzing Final Clustering Model 
+
+Internal and stability measures suggested that hierarchical clustering (agnes) with 2 clusters is the best solution. 
+
+On the next step, I'll analyze the m_agnesClust data frame which includes the clustering results of our chosen model.
+
+## Comparing Genres and Clusters {.tabset}
+
+Let's take a look at how genres distributed between our 2 clusters.
+
+### Genres in cluster 1
+
+Most of the cluster 1 consists of songs of "dance pop" genre. It followed by "pop" and "canadian pop" respectively.
+
+```{r}
+m_agnesClust %>% mutate(cluster = as.factor(cluster)) %>% 
+    group_by(genre) %>% filter(cluster == 1) %>% count(genre) %>% ungroup() %>%
+    mutate(perc = round(prop.table(n), 5)) %>% arrange(desc(perc))
+```
+
+If we visualize the cluster contents, we can see more clearly how "dance pop" genre constitutes the majority of cluster 1.
+
+```{r}
+m_agnesClust %>% mutate(cluster = as.factor(cluster)) %>% 
+  group_by(genre) %>% filter(cluster == 1) %>% count(genre) %>% ungroup() %>%
+  mutate(perc = round(prop.table(n), 5)) %>%
+  ggplot(aes(area = perc, fill = n, label = genre)) +
+  geom_treemap() + scale_fill_gradient(low = "#99cc00", high = "#003300") +
+  geom_treemap_text(fontface = "italic", colour = "white", place = "centre",
+                    grow = TRUE)
+```
+
+In order to see other genre's contribution to the cluster 1, I'll filter out "dance pop" genre.
+
+```{r}
+#filter dancepop genre
+m_agnesClust %>% mutate(cluster = as.factor(cluster)) %>% 
+  group_by(genre) %>% filter(cluster == 1) %>% count(genre) %>% ungroup() %>%
+  mutate(perc = round(prop.table(n), 5)) %>% filter(perc < 0.570) %>%
+  ggplot(aes(area = perc, fill = n, label = genre)) +
+  geom_treemap() + scale_fill_gradient(low = "#99cc00", high = "#003300") +
+  geom_treemap_text(fontface = "italic", colour = "white", place = "centre",
+                    grow = TRUE)
+```
+
+
+### Genres in cluster 2
+
+Again, most of the cluster 1 consists of songs of "dance pop" genre. It followed by "neo mellow", "canadian pop" and "pop" respectively.
+
+```{r}
+m_agnesClust %>% mutate(cluster = as.factor(cluster)) %>% 
+  group_by(genre) %>% filter(cluster == 2) %>% count(genre) %>% ungroup() %>%
+  mutate(perc = round(prop.table(n), 5)) %>% arrange(desc(perc))
+```
+
+As we can see below, unlike cluster 1, it can be clearly seen the contribution of all genres that constitutes cluster 2.
+
+```{r}
+m_agnesClust %>% mutate(cluster = as.factor(cluster)) %>% 
+  group_by(genre) %>% filter(cluster == 2) %>% count(genre) %>% ungroup() %>%
+  mutate(perc = round(prop.table(n), 5)) %>%
+  ggplot(aes(area = perc, fill = n, label = genre)) +
+  geom_treemap() + scale_fill_gradient(low = "#99cc00", high = "#003300") +
+  geom_treemap_text(fontface = "italic", colour = "white", place = "centre",
+                    grow = TRUE)
+```
+
+### Genres that divided into 2 clusters
+
+When we take a closer look we can see in some genres all songs of that genre have been assigned to the same cluster; while in others, genres have been divided into different clusters. Let's find out which genres, how much divided. 
+
+```{r}
+m_agnesClust %>% mutate(cluster = as.factor(cluster)) %>%
+  group_by(genre) %>% count(cluster) %>% mutate(perc = round(prop.table(n), 2)) %>%
+  filter(perc < 1.00) %>% 
+  ggplot(aes(genre, perc, fill = cluster)) + geom_col() + scale_fill_manual(values =c("#336633", "#99cc33")) +
+  ggtitle("Divided Genres") + 
+  theme(axis.title.y = element_blank()) + theme(axis.title.x = element_blank()) +
+  coord_flip() 
+```
+
+
+## Technical Features of Each Clusters {.tabset}
+
+In the previous section, we examined genres and clusters. In the next section, we'll analyze the technical features of songs in each cluster and how different they are from each other. 
+
+### BPM (Beats Per Minute)
+
+**Definition:** The tempo of the song.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(bpm)
+```
+
+Even if most of the songs in our clusters have similar bpm's, some songs in cluster 1 have a much higher tempo than others. The main bpm value of cluster 1 is 119.3, for cluster 2 it is 110.78.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(bpm, fill = cluster)) + geom_density(alpha = 0.5) + 
+  ggtitle("Bpm and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### Energy
+
+**Definition:** The energy of a song - the higher the value, the more energtic song.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(nrgy)
+```
+
+Songs in the cluster 1 have much higher energy than songs in cluster 2. Mean energy value of cluster 1 is 73.4, in cluster 2 it is 36.3. So, we can conclude that cluster 1 songs are more energetic than cluster 2 songs. 
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(nrgy, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Energy Level and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### Dance (Danceability)
+
+**Definition:** Danceability of the song. The higher the value, the easier it is to dance to this song.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(dnce)
+```
+
+Songs in Cluster 1 is more "danceable" than songs in cluster 2. Mean danceability value of cluster 1 is 65.8, in cluster 2 it is 48.9. This means cluster 1 is more like a "crazy dj party", cluster 2 is more like "have a drink and a good time".
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(dnce, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Dancebility and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### dB (Loudness)
+
+**Definition:** Loudness of the song. The higher the value, the louder the song.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(dB)
+```
+
+Songs in cluster 1 are louder than songs in cluster 2. While the mean dB value of cluster 1 is -5.29, it is -8.87 for cluster 2. So, we can conclude that cluster 1 songs are louder than cluster 2 songs.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(dB, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("dB(Loudness) and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### Live (Liveness)
+
+**Definition:** Liveness of the song. The higher the value, the more likely the song is a live recording.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(live)
+```
+
+In cluster 1, Liveness value is more spreaded than cluster 2. 
+In cluster 1, most of the songs are between 0-20. But there are also values between 21 and 74 (maximum value). 
+On the other hand in cluster 2 all songs are between 0 and 21. Most of the songs have a value between 5 and 15.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(live, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Liveness and Clusters") + theme(axis.title.y = element_blank())
+```
+
+I don't know what is the limit to say definitely "yes this is a live recorded song". Most of the songs in both clusters are “studio-recorded” (due to <20 liveliness values). Despite the similarity, we can say cluster 2 has more songs which are more likely “live recordings” than cluster 1.
+
+### Val (Valence)
+
+**Definition:** Valence of the song. The higher the value, the more positive mood for the song.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(val)
+```
+
+Songs in cluster 1 invoke a more positive mood among listeners than cluster 2 songs. The mean valence value for cluster 1 is 54.4 and cluster 2 is 27.1. So, we can conclude that a playlist of cluster 1 songs brings more "positive mood" than a playlist of cluster 2 songs.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(val, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Valence and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### Dur (Duration)
+
+**Definition:** The duration of the song (in seconds)
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster),
+         dur = dur/60) %>%
+  group_by(cluster) %>% skim(dur)
+```
+
+Most of the songs in both clusters have duration in between 3 and 5 minutes. The mean duration for cluster 1 is 3.74 (minutes) and for cluster 2 is 3.84 (minutes).
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster),
+         dur = dur/60) %>%
+  group_by(cluster) %>%
+  ggplot(aes(dur, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Song duration and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### Acous (Acousticness)
+
+**Definition:** Acousticness of the song. The higher the value the more acoustic the song is.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(acous)
+```
+
+Songs in cluster 2 are more acoustic than songs in cluster 1. The mean acoustics value for cluster 2 is 66,33 and for cluster 1 is 9,8. According to Wikipedia acoustic music is "music that solely or primarily uses instruments that produce sound through acoustic means, as opposed to electric or electronic means" [4](https://en.wikipedia.org/wiki/Acoustic_music). So we can think that songs in cluster 2 were created with more "acoustic instruments", songs in cluster 1 used more "electric or electronic means".
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(acous, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Acousticness and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### Spch (Speechiness)
+
+**Definition:** Speechiness of the song. The higher the value the more spoken word the song contains.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(spch)
+```
+
+Songs in cluster 1 contains more lyrics than songs in cluster 2. The mean speechiness value for cluster 1 is 8,65 and for cluster 2 is 3,78. This means cluster 1 has more "speechy" songs than cluster 2.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(spch, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Speechiness and Clusters") + theme(axis.title.y = element_blank())
+```
+
+### Pop (Popularity)
+
+**Definition:** Popularity of the song. The higher the value the more popular the song is.
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>% skim(pop)
+```
+
+Songs in both cluster 1 and 2 have similar popularity. The mean popularity value of cluster 1 is 66,53 and for cluster 2 it is 65,17. 
+
+```{r}
+m_agnesClust %>% select(-year, -title, -X1, -artist, -genre) %>%
+  mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  ggplot(aes(pop, fill = cluster)) + geom_density(alpha = 0.5) +
+  ggtitle("Popularity and Clusters") + theme(axis.title.y = element_blank())
+```
+
+
+**To sum up:**
+
+While **cluster 1** has; Higher tempo, More energetic, More danceable, More loud, More live recorded, More positive mood, Same duration, Less acoustic, More speech, Same popularity
+
+**Cluster 2** has; Lower tempo, Less energetic, Less danceable, Less Loud, Less live recorded, Less positive mood, Same duration, More acoustic, Less speech, Same popularity
+
+```{r}
+cl1 <- m_agnesClust %>% select_if(is.numeric) %>% mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  summarise_all(mean) %>% filter(cluster == 1) %>%
+  gather(var, value, -cluster) %>% 
+  ggplot(aes(x = var, y = -value, label = round(value,2))) + 
+  geom_col(fill = "#006600") + scale_x_discrete(position = "right") + ylab("Cluster 1") + geom_label(color = "white", fill = "#006600", position = position_stack(vjust = 0.5),
+            size = 3, label.size = 0, fontface = "bold") +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_text(face = "bold"),
+        axis.title.y = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank()) +
+  coord_flip() 
+
+cl2 <- m_agnesClust %>% select_if(is.numeric) %>% mutate(cluster = as.factor(cluster)) %>%
+  group_by(cluster) %>%
+  summarise_all(mean) %>% filter(cluster == 2) %>%
+  gather(var, value, -cluster) %>% 
+  ggplot(aes(x = var, y = value, label = round(value,2))) + geom_col(fill = "#33cc00") + scale_x_discrete(position = "left") + 
+  ylab("Cluster 2") + geom_label(fill = "#33cc00", color = "white", position = position_stack(vjust = 0.5),
+            size = 3, label.size = 0, fontface = "bold") + 
+  theme(axis.text.x = element_blank(),
+    axis.title.y = element_blank(),
+    axis.title.x = element_text(face = "bold"),
+    axis.ticks.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y.left = element_text()) +
+  coord_flip() 
+
+gridExtra::grid.arrange(cl1, cl2, ncol = 2, top = "Average Values of Features for Each Cluster")
+
+```
+
+
+# Discussion
+
+At the beginning of this project, my initial purpose was to create a model that can distinguish different genres in the data. I had 50 different genres, 588 (after removing duplicates) songs, and 10 technical features. However, I knew that I need to have a lot more than 588 songs in order to distinguish these 50 genres correctly. 
+
+Besides the insufficient sample, genres were not represented well. While the dance-pop genre has 324 songs, most of the genres have only 1 or 2 songs. And these genres were subgroups of the pop genre (Barbadian pop, Canadian pop, etc). 
+
+In other words, the sample at hand contained the characteristics of the dance-pop genre predominantly and it was not possible to create a model that would distinguish the representatives of a single genre. However, I still wanted to try and see how much the model could parse the genres or which genres could be in the same cluster.
+
+The final model proposed a solution with 2 clusters. 
+The vast majority of both clusters constituted by the dance-pop genre (57% of cluster 1 (309 songs) and (33%) of cluster 2(15 songs)).
+
+As genres are mostly pop versions and I don't know the differential features between pop (and many other) genres, I wanted to see how the technical characteristics varied between the two clusters.
+
+According to the results both clusters have;
+
+* similar popularity,
+* similar duration,
+* similar bpm levels (tempo).
+
+On the other hand, there are also differences.
+
+While **cluster 1** consists of songs which:
+
+* stimulating positive emotions,
+* has more lyrics
+* louder,
+* more energetic,
+* suitable for dancing,
+* probably recorded in a studio.
+
+**Cluster 2** songs are:
+
+* stimulating less positive emotions,
+* have fewer lyrics
+* not so loud,
+* less energetic,
+* less suitable for dancing and
+* probably recorded live.
+
+**To sum up;**
+
+**We can conclude that the final model can distinguish slow/acoustic and energetic dance songs which have similar "popularity".**
+
+
+
